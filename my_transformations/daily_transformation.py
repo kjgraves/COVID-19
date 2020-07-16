@@ -310,6 +310,8 @@ def get_plt_dfs(df):
     # No idea why but if I don't write this to a csv first and then reload it, it takes forever to run in dash...
     df_fips.to_csv("./df_counties.csv",index=False)   
     df_county = pd.read_csv("./df_counties.csv",dtype={"FIPS": str})
+    # Change Date back to datetime.date type
+    df_county['Date'] = df_county['Date'].apply(lambda x: datetime.datetime.strptime(x, '%Y-%m-%d').date())
       
 
     ### STATES ###
