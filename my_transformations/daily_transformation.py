@@ -7,11 +7,11 @@
 #               github.com/CSSEGISandData/COVID-19/, save it locally,
 #               and process it to allow for more rapid plotting
 #               
-# Notes: 
+# Notes: Eventually should change this to run this as an iterative update
 #################### Imports ##################################################
  
 import numpy as np
-from random import randint
+import time
 import sys
 import csv
 import requests
@@ -51,6 +51,8 @@ date_formats = ['%m/%d/%Y %H:%M','%m/%d/%y %H:%M','%Y-%m-%dT%H:%M:%S','%Y-%m-%d 
 # Pickle file names for foundational dataframes
 base_county_pickle_name = "county_df_{0}.pkl"
 base_state_pickle_name = "state_df_{0}.pkl"
+# Number of Days in slider
+n_day_slider = 7
 #################### Functions ################################################
 def init():
     """
@@ -163,6 +165,9 @@ def get_data():
     # Make sure all FIPS are 5 digits
     df["FIPS"] = df["FIPS"].apply(make_5dig_FIPS)
 
+    df = df[['FIPS','County','Province/State','Country/Region',
+             'Date', 'Confirmed','Deaths','Combined_Key','N Days From Start']]
+
     return df
 
 
@@ -217,85 +222,188 @@ def get_plt_dfs(df):
                               (df["County"] != "") &
                               (df["Country/Region"] == "US")].copy()
 
-    # Calculate doubling rate from the last week
-    df_fips["Confirmed Doubling Rate"] = np.nan
-    df_fips["Death Doubling Rate"]     = np.nan
-    for i in range(len(df_fips)):
-        if df_fips["Date"].iat[i] == end_date:
-
-            # Find last 7 days for that FIPS (including end date)
-            df_dat =  df_fips.loc[(df_fips["FIPS"].iat[i] == df_fips["FIPS"]) & ((df_fips["N Days From Start"].iat[i] - 
-                                  df_fips["N Days From Start"]) <= 6)]
-            if len(df_dat) == 7:
-                # Confirmed
-                y_dat = df_dat["Confirmed"]
-                if y_dat.iloc[0] > 0 and y_dat.is_monotonic_increasing and y_dat.iloc[0] < y_dat.iloc[-1]: # Must be increasing for this to be valid
-                    popt, pcov = curve_fit(lambda t,a,b: a*np.exp(b*t), np.arange(7), y_dat, p0=(y_dat.iloc[0],.1)) # 0.1 approx. 5 day doubling rate
-                    df_fips["Confirmed Doubling Rate"].iat[i] = np.log(2)/popt[1]
-                # Deaths
-                y_dat = df_dat["Deaths"]
-                if y_dat.iloc[0] > 0 and y_dat.is_monotonic_increasing and y_dat.iloc[0] < y_dat.iloc[-1]: # Must be increasing for this to be valid
-                    popt, pcov = curve_fit(lambda t,a,b: a*np.exp(b*t), np.arange(7), y_dat, p0=(y_dat.iloc[0],.1)) # 0.1 approx. 5 day doubling rate
-                    df_fips["Death Doubling Rate"].iat[i] = np.log(2)/popt[1]
-
-    # Get max date...
-    df_USA_max_date = df_fips[(df_fips["Date"] == end_date)]
-
-    # Sort by FIPS
-    df_plt = df_USA_max_date.sort_values(by=["FIPS","Date"]).reset_index(drop=True)
+    # Sort by FIPS and date
+    df_fips = df_fips.sort_values(by=["FIPS","Date"]).reset_index(drop=True)
 
     # Get logscale values
-    df_plt["Log10_Confirmed"] = df_plt["Confirmed"].apply(lambda x: np.log10(x))
-    df_plt["Log10_Deaths"] = df_plt["Deaths"].apply(lambda x: np.log10(x))
+    df_fips["Log10_Confirmed"] = df_fips["Confirmed"].apply(lambda x: np.log10(x))
+    df_fips["Log10_Deaths"] = df_fips["Deaths"].apply(lambda x: np.log10(x))
 
-    # No idea why but if I don't write this to a csv first and then reload it, it takes forever to run...
-    df_plt.to_csv("./df_counties.csv",index=False)   
+    # New Confirmed & Deaths (maybe find a way to vectorize this?)
+    df_fips["New_Confirmed"] = np.nan
+    df_fips["New_Deaths"] = np.nan
+    for i in range(1,len(df_fips)):
+        if ((df_fips["FIPS"].iat[i] == df_fips["FIPS"].iat[i-1]) and
+                (df_fips["County"].iat[i] == df_fips["County"].iat[i-1]) and
+                (df_fips["Date"].iat[i] == df_fips["Date"].iat[i-1] + datetime.timedelta(days=1))):
+            df_fips["New_Confirmed"].iat[i] = df_fips["Confirmed"].iat[i] - df_fips["Confirmed"].iat[i-1]
+            df_fips["New_Deaths"].iat[i] = df_fips["Deaths"].iat[i] - df_fips["Deaths"].iat[i-1]
+
+    ### Some specific calcs for New Confirmed and Deaths ### (So much improvement can be done here...)
+    # End Date - get New Confirmed/Deaths for previous week & month (30 days)
+    df_fips["Last_Week_Confirmed"] = np.nan
+    df_fips["Last_Week_Deaths"] = np.nan
+    for i in range(7,len(df_fips)):
+        if ((df_fips["Date"].iat[i] == end_date) and
+                (df_fips["County"].iat[i] == df_fips["County"].iat[i-7]) and
+                (df_fips["Province/State"].iat[i] == df_fips["Province/State"].iat[i-7]) and
+                (df_fips["Date"].iat[i] == df_fips["Date"].iat[i-7] + datetime.timedelta(days=7))):
+            df_fips["Last_Week_Confirmed"].iat[i] = df_fips["Confirmed"].iat[i] - df_fips["Confirmed"].iat[i-7]
+            df_fips["Last_Week_Deaths"].iat[i] = df_fips["Deaths"].iat[i] - df_fips["Deaths"].iat[i-7]
+    # ... month (30 days)
+    df_fips["Last_Month_Confirmed"] = np.nan
+    df_fips["Last_Month_Deaths"] = np.nan
+    for i in range(30,len(df_fips)):
+        if ((df_fips["Date"].iat[i] == end_date) and
+                (df_fips["County"].iat[i] == df_fips["County"].iat[i-30]) and
+                (df_fips["Province/State"].iat[i] == df_fips["Province/State"].iat[i-30]) and
+                (df_fips["Date"].iat[i] == df_fips["Date"].iat[i-30] + datetime.timedelta(days=30))):
+            df_fips["Last_Month_Confirmed"].iat[i] = df_fips["Confirmed"].iat[i] - df_fips["Confirmed"].iat[i-30]
+            df_fips["Last_Month_Deaths"].iat[i] = df_fips["Deaths"].iat[i] - df_fips["Deaths"].iat[i-30]
+    # If at start of week - calc new Confirmed/Deaths over the following week
+    # If at start of month - calc new Confirmed/Deaths over the following month
+    df_fips["Calendar_Week_Confirmed"] = np.nan
+    df_fips["Calendar_Week_Deaths"] = np.nan
+    df_fips["Calendar_Month_Confirmed"] = np.nan
+    df_fips["Calendar_Month_Deaths"] = np.nan
+    for i in range(len(df_fips)):
+        if (df_fips["Date"].iat[i].weekday() == 6): # Sunday (end of last week)
+            # Find last weekday of that week
+            i_end = 'Nope!'
+            for j in range(i+1,i+9): # go past next Sunday
+                if ((j == len(df_fips)) or
+                        (df_fips["County"].iat[i] != df_fips["County"].iat[j]) or
+                        (df_fips["Province/State"].iat[i] != df_fips["Province/State"].iat[j]) or 
+                        (df_fips["Date"].iat[i+1].isocalendar()[1] != df_fips["Date"].iat[j].isocalendar()[1])):
+                    i_end = j-1
+                    break
+            # Calc the number of new cases for the calendar week starting with the new cases on monday (and
+            #       assign it to that Monday - i+1)
+            if i_end > i:
+                df_fips["Calendar_Week_Confirmed"].iat[i+1] = df_fips["Confirmed"].iat[i_end] - df_fips["Confirmed"].iat[i]
+                df_fips["Calendar_Week_Deaths"].iat[i+1] = df_fips["Deaths"].iat[i_end] - df_fips["Deaths"].iat[i]
+        if (df_fips["Date"].iat[i].day == 1): # start of month
+            # Use a previous date or set to 0
+            prev_zero = False
+            if ((i == 0) or 
+                (df_fips["County"].iat[i] != df_fips["County"].iat[i-1]) or 
+                (df_fips["Province/State"].iat[i] != df_fips["Province/State"].iat[i-1]) or 
+                (df_fips["Date"].iat[i] != df_fips["Date"].iat[i-1] + datetime.timedelta(days=1))):
+                prev_zero = True
+            i_end = 'Nope!'
+            # Find last day of that month
+            for j in range(i+1,i+32): # go to next Sunday
+                if ((j >= len(df_fips)) or
+                        (df_fips["County"].iat[i] != df_fips["County"].iat[j]) or
+                        (df_fips["Province/State"].iat[i] != df_fips["Province/State"].iat[j]) or
+                        (df_fips["Date"].iat[i].month != df_fips["Date"].iat[j].month)):
+                    i_end = j-1
+                    break
+            if i_end > i:
+                if prev_zero:
+                    df_fips["Calendar_Month_Confirmed"].iat[i] = df_fips["Confirmed"].iat[i_end]
+                    df_fips["Calendar_Month_Deaths"].iat[i] = df_fips["Deaths"].iat[i_end]
+                else:
+                    df_fips["Calendar_Month_Confirmed"].iat[i] = df_fips["Confirmed"].iat[i_end] - df_fips["Confirmed"].iat[i-1]
+                    df_fips["Calendar_Month_Deaths"].iat[i] = df_fips["Deaths"].iat[i_end] - df_fips["Deaths"].iat[i-1]
+
+    # No idea why but if I don't write this to a csv first and then reload it, it takes forever to run in dash...
+    df_fips.to_csv("./df_counties.csv",index=False)   
     df_county = pd.read_csv("./df_counties.csv",dtype={"FIPS": str})
       
+
     ### STATES ###
     df_states = df[(df["Country/Region"] == "US") &
                     df["Province/State"].apply(lambda x : x == x and x != "")].copy()
 
     # Join by state and date
-    df_state_merge = df_states.groupby(['Date','Province/State',"N Days From Start"]).agg(
+    df_state = df_states.groupby(['Date','Province/State',"N Days From Start"]).agg(
                                                     {"Confirmed":np.nansum,
                                                     "Deaths": np.nansum}).reset_index()
 
-    # Calculate doubling rate from the last week
-    df_state_merge["Confirmed Doubling Rate"] = np.nan
-    df_state_merge["Death Doubling Rate"]     = np.nan
-    for i in range(len(df_state_merge)):
-        if df_state_merge["Date"].iat[i] == end_date:
-
-            # Find last 7 days for that State (including end date)
-            df_dat =  df_state_merge.loc[(df_state_merge["Province/State"].iat[i] == df_state_merge["Province/State"]) & 
-                                         ((df_state_merge["N Days From Start"].iat[i] - 
-                                           df_state_merge["N Days From Start"]) <= 6)]
-            if len(df_dat) == 7:
-                # Confirmed
-                y_dat = df_dat["Confirmed"]
-                if y_dat.iloc[0] > 0 and y_dat.is_monotonic_increasing and y_dat.iloc[0] < y_dat.iloc[-1]: # Must be increasing for this to be valid
-                    popt, pcov = curve_fit(lambda t,a,b: a*np.exp(b*t), np.arange(7), y_dat, p0=(y_dat.iloc[0],.1)) # 0.1 approx. 5 day doubling rate
-                    df_state_merge["Confirmed Doubling Rate"].iat[i] = np.log(2)/popt[1]
-                # Deaths
-                y_dat = df_dat["Deaths"]
-                if y_dat.iloc[0] > 0 and y_dat.is_monotonic_increasing and y_dat.iloc[0] < y_dat.iloc[-1]: # Must be increasing for this to be valid
-                    popt, pcov = curve_fit(lambda t,a,b: a*np.exp(b*t), np.arange(7), y_dat, p0=(y_dat.iloc[0],.1)) # 0.1 approx. 5 day doubling rate
-                    df_state_merge["Death Doubling Rate"].iat[i] = np.log(2)/popt[1]
-
-
-    df_state = df_state_merge[(df_state_merge["Date"] == end_date)].copy()
+    # Sort by State and date
+    df_state = df_state.sort_values(by=["Province/State","Date"]).reset_index(drop=True)
 
     df_state["Log10_Confirmed"] = df_state["Confirmed"].apply(lambda x: np.log10(x))
     df_state["Log10_Deaths"] = df_state["Deaths"].apply(lambda x: np.log10(x))
 
+    # New Confirmed & Deaths (maybe find a way to vectorize this?)
+    df_state["New_Confirmed"] = np.nan
+    df_state["New_Deaths"] = np.nan
+    for i in range(1,len(df_state)):
+        if ((df_state["Province/State"].iat[i] == df_state["Province/State"].iat[i-1]) and
+                (df_state["Date"].iat[i] == df_state["Date"].iat[i-1] + datetime.timedelta(days=1))):
+            df_state["New_Confirmed"].iat[i] = df_state["Confirmed"].iat[i] - df_state["Confirmed"].iat[i-1]
+            df_state["New_Deaths"].iat[i] = df_state["Deaths"].iat[i] - df_state["Deaths"].iat[i-1]
 
-
+    ### Some specific calcs for New Confirmed and Deaths ### (So much improvement can be done here...)
+    # End Date - get New Confirmed/Deaths for previous week & month (30 days)
+    df_state["Last_Week_Confirmed"] = np.nan
+    df_state["Last_Week_Deaths"] = np.nan
+    for i in range(7,len(df_state)):
+        if ((df_state["Date"].iat[i] == end_date) and
+                (df_state["Province/State"].iat[i] == df_state["Province/State"].iat[i-7]) and
+                (df_state["Date"].iat[i] == df_state["Date"].iat[i-7] + datetime.timedelta(days=7))):
+            df_state["Last_Week_Confirmed"].iat[i] = df_state["Confirmed"].iat[i] - df_state["Confirmed"].iat[i-7]
+            df_state["Last_Week_Deaths"].iat[i] = df_state["Deaths"].iat[i] - df_state["Deaths"].iat[i-7]
+    # ... month (30 days)
+    df_state["Last_Month_Confirmed"] = np.nan
+    df_state["Last_Month_Deaths"] = np.nan
+    for i in range(30,len(df_state)):
+        if ((df_state["Date"].iat[i] == end_date) and
+                (df_state["Province/State"].iat[i] == df_state["Province/State"].iat[i-30]) and
+                (df_state["Date"].iat[i] == df_state["Date"].iat[i-30] + datetime.timedelta(days=30))):
+            df_state["Last_Month_Confirmed"].iat[i] = df_state["Confirmed"].iat[i] - df_state["Confirmed"].iat[i-30]
+            df_state["Last_Month_Deaths"].iat[i] = df_state["Deaths"].iat[i] - df_state["Deaths"].iat[i-30]
+    # If at start of week - calc new Confirmed/Deaths over the following week
+    # If at start of month - calc new Confirmed/Deaths over the following month
+    df_state["Calendar_Week_Confirmed"] = np.nan
+    df_state["Calendar_Week_Deaths"] = np.nan
+    df_state["Calendar_Month_Confirmed"] = np.nan
+    df_state["Calendar_Month_Deaths"] = np.nan
+    for i in range(len(df_state)):
+        if (df_state["Date"].iat[i].weekday() == 6): # Sunday (end of last week)
+            # Find last weekday of that week
+            i_end = 'Nope!'
+            for j in range(i+1,i+9): # go past next Sunday
+                if ((j == len(df_state)) or
+                        (df_state["Province/State"].iat[i] != df_state["Province/State"].iat[j]) or 
+                        (df_state["Date"].iat[i+1].isocalendar()[1] != df_state["Date"].iat[j].isocalendar()[1])):
+                    i_end = j-1
+                    break
+            # Calc the number of new cases for the calendar week starting with the new cases on monday (and
+            #       assign it to that Monday - i+1)
+            if i_end > i:
+                df_state["Calendar_Week_Confirmed"].iat[i+1] = df_state["Confirmed"].iat[i_end] - df_state["Confirmed"].iat[i]
+                df_state["Calendar_Week_Deaths"].iat[i+1] = df_state["Deaths"].iat[i_end] - df_state["Deaths"].iat[i]
+        if (df_state["Date"].iat[i].day == 1): # start of month
+            # Use a previous date or set to 0
+            prev_zero = False
+            if ((i == 0) or 
+                (df_state["Province/State"].iat[i] != df_state["Province/State"].iat[i-1]) or 
+                (df_state["Date"].iat[i] != df_state["Date"].iat[i-1] + datetime.timedelta(days=1))):
+                prev_zero = True
+            i_end = 'Nope!'
+            # Find last day of that month
+            for j in range(i+1,i+32): # go to next Sunday
+                if ((j >= len(df_state)) or
+                        (df_state["Province/State"].iat[i] != df_state["Province/State"].iat[j]) or
+                        (df_state["Date"].iat[i].month != df_state["Date"].iat[j].month)):
+                    i_end = j-1
+                    break
+            if i_end > i:
+                if prev_zero:
+                    df_state["Calendar_Month_Confirmed"].iat[i] = df_state["Confirmed"].iat[i_end]
+                    df_state["Calendar_Month_Deaths"].iat[i] = df_state["Deaths"].iat[i_end]
+                else:
+                    df_state["Calendar_Month_Confirmed"].iat[i] = df_state["Confirmed"].iat[i_end] - df_state["Confirmed"].iat[i-1]
+                    df_state["Calendar_Month_Deaths"].iat[i] = df_state["Deaths"].iat[i_end] - df_state["Deaths"].iat[i-1]
 
     return df_county, df_state
 
 #################### Executables ##############################################
- 
+t0 = time.time() 
+
 # Create Data dir
 init()
 
@@ -311,8 +419,52 @@ df_county.to_pickle(base_county_pickle_name.format(today))
 df_state.to_pickle(base_state_pickle_name.format(today))
 
 
+te = time.time()
+print("Execution Time: {0:5.2f}s".format(te-t0))
 
 
 
+# Old Code: Doubling Rates
+# Counties
+#    # Calculate doubling rate from the last week
+#    df_fips["Confirmed Doubling Rate"] = np.nan
+#    df_fips["Death Doubling Rate"]     = np.nan
+#    for i in range(len(df_fips)):
+#        if df_fips["Date"].iat[i] == end_date:
 
+#            # Find last 7 days for that FIPS (including end date)
+#            df_dat =  df_fips.loc[(df_fips["FIPS"].iat[i] == df_fips["FIPS"]) & ((df_fips["N Days From Start"].iat[i] - 
+#                                  df_fips["N Days From Start"]) <= 6)]
+#            if len(df_dat) == 7:
+#                # Confirmed
+#                y_dat = df_dat["Confirmed"]
+#                if y_dat.iloc[0] > 0 and y_dat.is_monotonic_increasing and y_dat.iloc[0] < y_dat.iloc[-1]: # Must be increasing for this to be valid
+#                    popt, pcov = curve_fit(lambda t,a,b: a*np.exp(b*t), np.arange(7), y_dat, p0=(y_dat.iloc[0],.1)) # 0.1 approx. 5 day doubling rate
+#                    df_fips["Confirmed Doubling Rate"].iat[i] = np.log(2)/popt[1]
+#                # Deaths
+#                y_dat = df_dat["Deaths"]
+#                if y_dat.iloc[0] > 0 and y_dat.is_monotonic_increasing and y_dat.iloc[0] < y_dat.iloc[-1]: # Must be increasing for this to be valid
+#                    popt, pcov = curve_fit(lambda t,a,b: a*np.exp(b*t), np.arange(7), y_dat, p0=(y_dat.iloc[0],.1)) # 0.1 approx. 5 day doubling rate
+#                    df_fips["Death Doubling Rate"].iat[i] = np.log(2)/popt[1]
+## States
+#    # Calculate doubling rate from the last week
+#    df_state_merge["Confirmed Doubling Rate"] = np.nan
+#    df_state_merge["Death Doubling Rate"]     = np.nan
+#    for i in range(len(df_state_merge)):
+#        if df_state_merge["Date"].iat[i] == end_date:
 
+#            # Find last 7 days for that State (including end date)
+#            df_dat =  df_state_merge.loc[(df_state_merge["Province/State"].iat[i] == df_state_merge["Province/State"]) & 
+#                                         ((df_state_merge["N Days From Start"].iat[i] - 
+#                                           df_state_merge["N Days From Start"]) <= 6)]
+#            if len(df_dat) == 7:
+#                # Confirmed
+#                y_dat = df_dat["Confirmed"]
+#                if y_dat.iloc[0] > 0 and y_dat.is_monotonic_increasing and y_dat.iloc[0] < y_dat.iloc[-1]: # Must be increasing for this to be valid
+#                    popt, pcov = curve_fit(lambda t,a,b: a*np.exp(b*t), np.arange(7), y_dat, p0=(y_dat.iloc[0],.1)) # 0.1 approx. 5 day doubling rate
+#                    df_state_merge["Confirmed Doubling Rate"].iat[i] = np.log(2)/popt[1]
+#                # Deaths
+#                y_dat = df_dat["Deaths"]
+#                if y_dat.iloc[0] > 0 and y_dat.is_monotonic_increasing and y_dat.iloc[0] < y_dat.iloc[-1]: # Must be increasing for this to be valid
+#                    popt, pcov = curve_fit(lambda t,a,b: a*np.exp(b*t), np.arange(7), y_dat, p0=(y_dat.iloc[0],.1)) # 0.1 approx. 5 day doubling rate
+#                    df_state_merge["Death Doubling Rate"].iat[i] = np.log(2)/popt[1]
